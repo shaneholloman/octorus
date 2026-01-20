@@ -139,25 +139,31 @@ impl App {
         key: event::KeyEvent,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<()> {
+        let visible_lines = terminal.size()?.height.saturating_sub(8) as usize; // Header + Footer + borders
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.state = AppState::FileList,
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.diff_line_count > 0 {
                     self.selected_line =
                         (self.selected_line + 1).min(self.diff_line_count.saturating_sub(1));
+                    self.adjust_scroll(visible_lines);
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.selected_line = self.selected_line.saturating_sub(1);
+                self.adjust_scroll(visible_lines);
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.diff_line_count > 0 {
                     self.selected_line =
                         (self.selected_line + 20).min(self.diff_line_count.saturating_sub(1));
+                    self.adjust_scroll(visible_lines);
                 }
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.selected_line = self.selected_line.saturating_sub(20);
+                self.adjust_scroll(visible_lines);
             }
             KeyCode::Char(c) if c == self.config.keybindings.comment => {
                 self.open_comment_editor(terminal).await?
@@ -165,6 +171,21 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Adjust scroll_offset to keep selected_line visible
+    fn adjust_scroll(&mut self, visible_lines: usize) {
+        if visible_lines == 0 {
+            return;
+        }
+        // If selected line is above visible area, scroll up
+        if self.selected_line < self.scroll_offset {
+            self.scroll_offset = self.selected_line;
+        }
+        // If selected line is below visible area, scroll down
+        if self.selected_line >= self.scroll_offset + visible_lines {
+            self.scroll_offset = self.selected_line.saturating_sub(visible_lines) + 1;
+        }
     }
 
     async fn handle_comment_preview_input(&mut self, key: event::KeyEvent) -> Result<()> {

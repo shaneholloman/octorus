@@ -1,5 +1,5 @@
 mod client;
-mod comment;
+pub mod comment;
 mod pr;
 
 // Explicit re-exports - only export what is actually used

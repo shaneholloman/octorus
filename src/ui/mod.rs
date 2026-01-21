@@ -1,3 +1,4 @@
+mod comment_list;
 mod diff_view;
 mod file_list;
 mod help;
@@ -44,6 +45,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppState::DiffView => diff_view::render(frame, app),
         AppState::CommentPreview => diff_view::render_with_preview(frame, app),
         AppState::SuggestionPreview => diff_view::render_with_suggestion_preview(frame, app),
+        AppState::CommentList => comment_list::render(frame, app),
         AppState::Help => help::render(frame, app),
     }
 }

@@ -40,7 +40,8 @@ pub fn render(frame: &mut Frame, _app: &App) {
         Line::from("  Enter           View file diff"),
         Line::from("  a               Approve PR"),
         Line::from("  r               Request changes"),
-        Line::from("  m               Comment only"),
+        Line::from("  c               Comment only"),
+        Line::from("  C               View review comments"),
         Line::from("  ?               Toggle help"),
         Line::from("  q               Quit"),
         Line::from(""),
@@ -55,6 +56,16 @@ pub fn render(frame: &mut Frame, _app: &App) {
         Line::from("  Ctrl-u          Page up"),
         Line::from("  c               Add comment at line"),
         Line::from("  s               Add suggestion at line"),
+        Line::from("  q, Esc          Back to file list"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Comment List View",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  j/k, Down/Up    Move selection"),
+        Line::from("  Enter           Jump to file/line"),
         Line::from("  q, Esc          Back to file list"),
         Line::from(""),
         Line::from(vec![Span::styled(

@@ -6,7 +6,7 @@ use crate::github::{self, ChangedFile, PullRequest};
 pub enum DataLoadResult {
     /// APIからデータ取得成功
     Success {
-        pr: PullRequest,
+        pr: Box<PullRequest>,
         files: Vec<ChangedFile>,
     },
     /// エラー
@@ -45,7 +45,7 @@ async fn fetch_and_send(repo: &str, pr_number: u32, tx: mpsc::Sender<DataLoadRes
     ) {
         Ok((pr, files)) => {
             let _ = cache::write_cache(repo, pr_number, &pr, &files);
-            let _ = tx.send(DataLoadResult::Success { pr, files }).await;
+            let _ = tx.send(DataLoadResult::Success { pr: Box::new(pr), files }).await;
         }
         Err(e) => {
             let _ = tx.send(DataLoadResult::Error(e.to_string())).await;

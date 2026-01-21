@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use super::client::{gh_api, gh_api_post, FieldValue};
 use super::pr::User;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewComment {
     pub id: u64,
@@ -15,7 +14,6 @@ pub struct ReviewComment {
     pub created_at: String,
 }
 
-#[allow(dead_code)]
 pub async fn fetch_review_comments(repo: &str, pr_number: u32) -> Result<Vec<ReviewComment>> {
     let endpoint = format!("repos/{}/pulls/{}/comments", repo, pr_number);
     let json = gh_api(&endpoint).await?;

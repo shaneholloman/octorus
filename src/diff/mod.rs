@@ -40,7 +40,7 @@ fn parse_hunk_header(line: &str) -> Option<u32> {
 
     // Extract the number (stop at comma or space)
     let end_pos = after_plus
-        .find(|c: char| c == ',' || c == ' ')
+        .find([',', ' '])
         .unwrap_or(after_plus.len());
     let num_str = &after_plus[..end_pos];
 
@@ -106,16 +106,18 @@ pub fn get_line_info(patch: &str, line_index: usize) -> Option<DiffLineInfo> {
 fn classify_line(line: &str) -> (LineType, &str) {
     if line.starts_with("@@") {
         (LineType::Header, line)
-    } else if line.starts_with("+++") || line.starts_with("---") {
+    } else if line.starts_with("+++")
+        || line.starts_with("---")
+        || line.starts_with("diff ")
+        || line.starts_with("index ")
+    {
         (LineType::Meta, line)
-    } else if line.starts_with("diff ") || line.starts_with("index ") {
-        (LineType::Meta, line)
-    } else if line.starts_with('+') {
-        (LineType::Added, &line[1..])
-    } else if line.starts_with('-') {
-        (LineType::Removed, &line[1..])
-    } else if line.starts_with(' ') {
-        (LineType::Context, &line[1..])
+    } else if let Some(content) = line.strip_prefix('+') {
+        (LineType::Added, content)
+    } else if let Some(content) = line.strip_prefix('-') {
+        (LineType::Removed, content)
+    } else if let Some(content) = line.strip_prefix(' ') {
+        (LineType::Context, content)
     } else {
         // Lines without prefix (shouldn't happen in valid patches, but handle gracefully)
         (LineType::Context, line)

@@ -64,7 +64,8 @@ or --repo owner/repo --pr 123
 | `Enter` | Open diff view |
 | `a` | Approve PR |
 | `r` | Request changes |
-| `m` | Comment only |
+| `c` | Comment only |
+| `C` | View review comments |
 | `?` | Toggle help |
 | `q` | Quit |
 
@@ -77,6 +78,16 @@ or --repo owner/repo --pr 123
 | `Ctrl-d` | Page down |
 | `Ctrl-u` | Page up |
 | `c` | Add comment at line |
+| `s` | Add suggestion at line |
+| `q` / `Esc` | Back to file list |
+
+#### Comment List View
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | Move down |
+| `k` / `↑` | Move up |
+| `Enter` | Jump to file/line |
 | `q` / `Esc` | Back to file list |
 
 ## Configuration

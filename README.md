@@ -1,5 +1,9 @@
 # octorus
 
+<p align="center">
+  <img src="assets/banner.png" alt="octorus banner" width="600">
+</p>
+
 [![Crates.io](https://img.shields.io/crates/v/octorus.svg)](https://crates.io/crates/octorus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 

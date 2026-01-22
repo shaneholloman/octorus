@@ -4,6 +4,8 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::Stdout;
 use tokio::sync::mpsc;
 
+use crate::ai::orchestrator::RallyEvent;
+use crate::ai::{Context, Orchestrator, RallyState};
 use crate::config::Config;
 use crate::github::comment::{DiscussionComment, ReviewComment};
 use crate::github::{self, ChangedFile, PullRequest};
@@ -18,6 +20,17 @@ pub enum AppState {
     SuggestionPreview,
     CommentList,
     Help,
+    AiRally,
+}
+
+/// State for AI Rally view
+#[derive(Debug, Clone)]
+pub struct AiRallyState {
+    pub iteration: u32,
+    pub max_iterations: u32,
+    pub state: RallyState,
+    pub history: Vec<RallyEvent>,
+    pub logs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -83,11 +96,15 @@ pub struct App {
     pub discussion_comment_detail_scroll: usize,
     // Comment tab state
     pub comment_tab: CommentTab,
+    // AI Rally state
+    pub ai_rally_state: Option<AiRallyState>,
+    pub working_dir: Option<String>,
     // Receivers
     data_receiver: Option<mpsc::Receiver<DataLoadResult>>,
     retry_sender: Option<mpsc::Sender<()>>,
     comment_receiver: Option<mpsc::Receiver<Result<Vec<ReviewComment>, String>>>,
     discussion_comment_receiver: Option<mpsc::Receiver<Result<Vec<DiscussionComment>, String>>>,
+    rally_event_receiver: Option<mpsc::Receiver<RallyEvent>>,
 }
 
 impl App {
@@ -122,10 +139,13 @@ impl App {
             discussion_comment_detail_mode: false,
             discussion_comment_detail_scroll: 0,
             comment_tab: CommentTab::default(),
+            ai_rally_state: None,
+            working_dir: None,
             data_receiver: Some(rx),
             retry_sender: None,
             comment_receiver: None,
             discussion_comment_receiver: None,
+            rally_event_receiver: None,
         };
 
         (app, tx)
@@ -168,10 +188,13 @@ impl App {
             discussion_comment_detail_mode: false,
             discussion_comment_detail_scroll: 0,
             comment_tab: CommentTab::default(),
+            ai_rally_state: None,
+            working_dir: None,
             data_receiver: Some(rx),
             retry_sender: None,
             comment_receiver: None,
             discussion_comment_receiver: None,
+            rally_event_receiver: None,
         };
 
         (app, tx)
@@ -188,12 +211,17 @@ impl App {
             self.poll_data_updates();
             self.poll_comment_updates();
             self.poll_discussion_comment_updates();
+            self.poll_rally_events();
             terminal.draw(|frame| ui::render(frame, self))?;
             self.handle_input(&mut terminal).await?;
         }
 
         ui::restore_terminal(&mut terminal)?;
         Ok(())
+    }
+
+    pub fn set_working_dir(&mut self, dir: Option<String>) {
+        self.working_dir = dir;
     }
 
     /// バックグラウンドタスクからのデータ更新をポーリング
@@ -278,6 +306,41 @@ impl App {
         }
     }
 
+    /// AI Rally イベントのポーリング
+    fn poll_rally_events(&mut self) {
+        let Some(ref mut rx) = self.rally_event_receiver else {
+            return;
+        };
+
+        // Process all available events
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    if let Some(ref mut rally_state) = self.ai_rally_state {
+                        match &event {
+                            RallyEvent::StateChanged(state) => {
+                                rally_state.state = *state;
+                            }
+                            RallyEvent::IterationStarted(i) => {
+                                rally_state.iteration = *i;
+                            }
+                            RallyEvent::Log(msg) => {
+                                rally_state.logs.push(msg.clone());
+                            }
+                            _ => {}
+                        }
+                        rally_state.history.push(event);
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.rally_event_receiver = None;
+                    break;
+                }
+            }
+        }
+    }
+
     fn handle_data_result(&mut self, result: DataLoadResult) {
         match result {
             DataLoadResult::Success { pr, files } => {
@@ -353,6 +416,7 @@ impl App {
                     }
                     AppState::CommentList => self.handle_comment_list_input(key, terminal).await?,
                     AppState::Help => self.handle_help_input(key)?,
+                    AppState::AiRally => self.handle_ai_rally_input(key)?,
                 }
             }
         }
@@ -402,10 +466,101 @@ impl App {
             }
             KeyCode::Char('C') => self.open_comment_list(),
             KeyCode::Char('R') => self.refresh_all(),
+            KeyCode::Char('A') => self.start_ai_rally(),
             KeyCode::Char('?') => self.state = AppState::Help,
             _ => {}
         }
         Ok(())
+    }
+
+    fn handle_ai_rally_input(&mut self, key: event::KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('q') => {
+                // Abort rally and return to file list
+                self.ai_rally_state = None;
+                self.rally_event_receiver = None;
+                self.state = AppState::FileList;
+            }
+            KeyCode::Char('y') => {
+                // Grant permission or answer yes
+                if let Some(ref state) = self.ai_rally_state {
+                    if state.state == RallyState::WaitingForPermission
+                        || state.state == RallyState::WaitingForClarification
+                    {
+                        // TODO: Continue the rally with permission/clarification
+                    }
+                }
+            }
+            KeyCode::Char('n') => {
+                // Deny permission or answer no
+                if let Some(ref state) = self.ai_rally_state {
+                    if state.state == RallyState::WaitingForPermission {
+                        // Abort the rally
+                        self.ai_rally_state = None;
+                        self.rally_event_receiver = None;
+                        self.state = AppState::FileList;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn start_ai_rally(&mut self) {
+        // Get PR data for context
+        let Some(pr) = self.pr() else {
+            return;
+        };
+
+        let diff = self
+            .files()
+            .iter()
+            .filter_map(|f| f.patch.as_ref())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let context = Context {
+            repo: self.repo.clone(),
+            pr_number: self.pr_number,
+            pr_title: pr.title.clone(),
+            pr_body: pr.body.clone(),
+            diff,
+            working_dir: self.working_dir.clone(),
+        };
+
+        let (event_tx, event_rx) = mpsc::channel(100);
+        self.rally_event_receiver = Some(event_rx);
+
+        // Initialize rally state
+        self.ai_rally_state = Some(AiRallyState {
+            iteration: 0,
+            max_iterations: self.config.ai.max_iterations,
+            state: RallyState::Initializing,
+            history: Vec::new(),
+            logs: Vec::new(),
+        });
+
+        self.state = AppState::AiRally;
+
+        // Spawn the orchestrator
+        let config = self.config.ai.clone();
+        let repo = self.repo.clone();
+        let pr_number = self.pr_number;
+
+        tokio::spawn(async move {
+            let orchestrator_result = Orchestrator::new(&repo, pr_number, config, event_tx);
+            match orchestrator_result {
+                Ok(mut orchestrator) => {
+                    orchestrator.set_context(context);
+                    let _ = orchestrator.run().await;
+                }
+                Err(e) => {
+                    eprintln!("Failed to create orchestrator: {}", e);
+                }
+            }
+        });
     }
 
     fn refresh_all(&mut self) {

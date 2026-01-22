@@ -9,6 +9,7 @@ use std::panic;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+mod ai;
 mod app;
 mod cache;
 mod config;
@@ -39,6 +40,18 @@ struct Args {
     /// Cache TTL in seconds (default: 300 = 5 minutes)
     #[arg(long, default_value = "300")]
     cache_ttl: u64,
+
+    /// Start AI Rally mode directly
+    #[arg(long, default_value = "false")]
+    ai_rally: bool,
+
+    /// Working directory for AI agents (default: current directory)
+    #[arg(long)]
+    working_dir: Option<String>,
+
+    /// Resume an interrupted AI Rally session
+    #[arg(long, default_value = "false")]
+    resume_rally: bool,
 }
 
 /// Restore terminal to normal state
@@ -100,6 +113,16 @@ async fn main() -> Result<()> {
     };
 
     app.set_retry_sender(retry_tx);
+
+    // Set working directory for AI agents
+    if let Some(dir) = args.working_dir.clone() {
+        app.set_working_dir(Some(dir));
+    } else {
+        // Use current directory as default
+        if let Ok(cwd) = std::env::current_dir() {
+            app.set_working_dir(Some(cwd.to_string_lossy().to_string()));
+        }
+    }
 
     // Cancellation token for graceful shutdown
     let cancel_token = CancellationToken::new();

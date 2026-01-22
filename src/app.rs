@@ -401,10 +401,23 @@ impl App {
                 self.submit_review(ReviewAction::Comment, terminal).await?
             }
             KeyCode::Char('C') => self.open_comment_list(),
+            KeyCode::Char('R') => self.refresh_all(),
             KeyCode::Char('?') => self.state = AppState::Help,
             _ => {}
         }
         Ok(())
+    }
+
+    fn refresh_all(&mut self) {
+        // キャッシュを全削除
+        let _ = crate::cache::invalidate_all_cache(&self.repo, self.pr_number);
+        // コメントデータをクリア
+        self.review_comments = None;
+        self.issue_comments = None;
+        self.comments_loading = false;
+        self.issue_comments_loading = false;
+        // PRデータを再取得
+        self.retry_load();
     }
 
     async fn handle_diff_view_input(

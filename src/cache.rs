@@ -82,12 +82,32 @@ pub fn write_cache(
     Ok(())
 }
 
-/// キャッシュ削除
+/// PRキャッシュ削除
 #[allow(dead_code)]
 pub fn invalidate_cache(repo: &str, pr_number: u32) -> Result<()> {
     let path = cache_file_path(repo, pr_number);
     if path.exists() {
         std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// 全キャッシュ削除（PR + コメント + Issue コメント）
+pub fn invalidate_all_cache(repo: &str, pr_number: u32) -> Result<()> {
+    // PR cache
+    let pr_path = cache_file_path(repo, pr_number);
+    if pr_path.exists() {
+        std::fs::remove_file(pr_path)?;
+    }
+    // Comment cache
+    let comment_path = comment_cache_file_path(repo, pr_number);
+    if comment_path.exists() {
+        std::fs::remove_file(comment_path)?;
+    }
+    // Issue comment cache
+    let issue_comment_path = issue_comment_cache_file_path(repo, pr_number);
+    if issue_comment_path.exists() {
+        std::fs::remove_file(issue_comment_path)?;
     }
     Ok(())
 }

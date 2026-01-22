@@ -43,6 +43,7 @@ pub fn render(frame: &mut Frame, _app: &App) {
         Line::from("  r               Request changes"),
         Line::from("  c               Comment only"),
         Line::from("  C               View review comments"),
+        Line::from("  R               Refresh (clear cache and reload)"),
         Line::from("  ?               Toggle help"),
         Line::from("  q               Quit"),
         Line::from(""),

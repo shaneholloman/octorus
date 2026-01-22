@@ -2,7 +2,16 @@
 //!
 //! This module provides syntax highlighting for diff content using syntect
 //! and converts the output to ratatui Span format using syntect-tui.
+//!
+//! ## Theme Loading
+//!
+//! Themes are loaded from two sources:
+//! 1. **Bundled themes**: Syntect defaults + Dracula (compiled into binary)
+//! 2. **User themes**: `~/.config/octorus/themes/*.tmTheme` files
+//!
+//! User themes override bundled themes if they have the same name.
 
+use std::io::Cursor;
 use std::sync::OnceLock;
 
 use ratatui::style::{Color, Modifier, Style};
@@ -14,6 +23,9 @@ use syntect::parsing::SyntaxSet;
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
+/// Bundled Dracula theme (compiled into binary)
+const DRACULA_THEME: &[u8] = include_bytes!("../../themes/Dracula.tmTheme");
+
 /// Get the global SyntaxSet instance.
 /// This is lazily initialized on first access.
 pub fn syntax_set() -> &'static SyntaxSet {
@@ -22,8 +34,54 @@ pub fn syntax_set() -> &'static SyntaxSet {
 
 /// Get the global ThemeSet instance.
 /// This is lazily initialized on first access.
+///
+/// Loads themes in the following order:
+/// 1. Syntect default themes
+/// 2. Bundled themes (Dracula)
+/// 3. User themes from ~/.config/octorus/themes/
 pub fn theme_set() -> &'static ThemeSet {
-    THEME_SET.get_or_init(ThemeSet::load_defaults)
+    THEME_SET.get_or_init(load_all_themes)
+}
+
+/// Load all themes from default, bundled, and user sources.
+fn load_all_themes() -> ThemeSet {
+    let mut themes = ThemeSet::load_defaults();
+
+    // Load bundled Dracula theme
+    if let Ok(theme) = ThemeSet::load_from_reader(&mut Cursor::new(DRACULA_THEME)) {
+        themes.themes.insert("Dracula".to_string(), theme);
+    }
+
+    // Load user themes from ~/.config/octorus/themes/
+    if let Some(config_dir) = dirs::config_dir() {
+        let user_themes_dir = config_dir.join("octorus").join("themes");
+        if user_themes_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&user_themes_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|e| e == "tmTheme") {
+                        if let Ok(theme) = ThemeSet::get_theme(&path) {
+                            // Use filename without extension as theme name
+                            if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                                themes.themes.insert(name.to_string(), theme);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    themes
+}
+
+/// List all available theme names.
+pub fn available_themes() -> Vec<&'static str> {
+    theme_set()
+        .themes
+        .keys()
+        .map(|s| s.as_str())
+        .collect()
 }
 
 /// Get the SyntaxReference for a file based on its extension.
@@ -206,5 +264,42 @@ mod tests {
         let spans = highlight_code_line("", &mut highlighter);
         // Empty line should produce empty or single empty span
         assert!(spans.is_empty() || (spans.len() == 1 && spans[0].content.is_empty()));
+    }
+
+    #[test]
+    fn test_bundled_dracula_theme() {
+        // Dracula theme should be available from bundled themes
+        let theme = get_theme("Dracula");
+        assert!(!theme.scopes.is_empty(), "Dracula should have scopes");
+    }
+
+    #[test]
+    fn test_available_themes_includes_defaults_and_bundled() {
+        let themes = available_themes();
+        // Should include syntect defaults
+        assert!(
+            themes.contains(&"base16-ocean.dark"),
+            "Should include base16-ocean.dark"
+        );
+        // Should include bundled Dracula
+        assert!(themes.contains(&"Dracula"), "Should include Dracula");
+    }
+
+    #[test]
+    fn test_highlight_with_dracula() {
+        let syntax = syntax_for_file("test.rs").unwrap();
+        let theme = get_theme("Dracula");
+        let mut highlighter = HighlightLines::new(syntax, theme);
+
+        let spans = highlight_code_line("fn main() {", &mut highlighter);
+        assert!(!spans.is_empty());
+
+        // fn keyword should be highlighted
+        let fn_span = spans.iter().find(|s| s.content.as_ref() == "fn");
+        assert!(fn_span.is_some(), "Should have a span for 'fn'");
+        assert!(
+            fn_span.unwrap().style.fg.is_some(),
+            "'fn' should have foreground color"
+        );
     }
 }

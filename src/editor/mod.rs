@@ -60,7 +60,7 @@ fn resolve_editor(configured: &str) -> String {
     if !configured.is_empty() {
         return configured.to_string();
     }
-    env::var("EDITOR").unwrap_or_else(|_| "hx".to_string())
+    env::var("EDITOR").unwrap_or_else(|_| "vi".to_string())
 }
 
 fn extract_comment_body(content: &str) -> String {

@@ -31,7 +31,7 @@ pub struct KeybindingsConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            editor: "hx".to_owned(),
+            editor: "vi".to_owned(),
             diff: DiffConfig::default(),
             keybindings: KeybindingsConfig::default(),
         }

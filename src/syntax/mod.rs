@@ -101,8 +101,9 @@ pub fn syntax_for_file(filename: &str) -> Option<&'static syntect::parsing::Synt
 
 /// Get a theme by name with fallback to default themes.
 ///
-/// Falls back to "base16-ocean.dark" if the specified theme is not found,
-/// and falls back to any available theme if that also fails.
+/// Theme matching is case-insensitive. Falls back to "base16-ocean.dark"
+/// if the specified theme is not found, and falls back to any available
+/// theme if that also fails.
 ///
 /// # Arguments
 /// * `name` - The name of the theme to get
@@ -110,17 +111,26 @@ pub fn syntax_for_file(filename: &str) -> Option<&'static syntect::parsing::Synt
 /// # Returns
 /// A reference to the theme
 pub fn get_theme(name: &str) -> &'static syntect::highlighting::Theme {
-    theme_set()
-        .themes
-        .get(name)
-        .or_else(|| theme_set().themes.get("base16-ocean.dark"))
-        .unwrap_or_else(|| {
-            theme_set()
-                .themes
-                .values()
-                .next()
-                .expect("syntect default themes should never be empty")
-        })
+    let themes = &theme_set().themes;
+
+    // Try exact match first
+    if let Some(theme) = themes.get(name) {
+        return theme;
+    }
+
+    // Try case-insensitive match
+    let name_lower = name.to_lowercase();
+    for (key, theme) in themes.iter() {
+        if key.to_lowercase() == name_lower {
+            return theme;
+        }
+    }
+
+    // Fallback to default themes
+    themes
+        .get("base16-ocean.dark")
+        .or_else(|| themes.values().next())
+        .expect("syntect default themes should never be empty")
 }
 
 /// Highlight a code line and return a vector of owned Spans.
@@ -301,5 +311,22 @@ mod tests {
             fn_span.unwrap().style.fg.is_some(),
             "'fn' should have foreground color"
         );
+    }
+
+    #[test]
+    fn test_get_theme_case_insensitive() {
+        // Theme names should match case-insensitively
+        let theme1 = get_theme("Dracula");
+        let theme2 = get_theme("dracula");
+        let theme3 = get_theme("DRACULA");
+
+        // All should return the same Dracula theme (not fallback)
+        assert!(!theme1.scopes.is_empty());
+        assert!(!theme2.scopes.is_empty());
+        assert!(!theme3.scopes.is_empty());
+
+        // Verify they have the same number of scopes (same theme)
+        assert_eq!(theme1.scopes.len(), theme2.scopes.len());
+        assert_eq!(theme1.scopes.len(), theme3.scopes.len());
     }
 }

@@ -271,3 +271,116 @@ pub fn write_discussion_comment_cache(
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_repo_name_valid() {
+        // Standard owner/repo format
+        assert_eq!(
+            sanitize_repo_name("owner/repo").unwrap(),
+            "owner_repo".to_string()
+        );
+
+        // Repo name with hyphens
+        assert_eq!(
+            sanitize_repo_name("my-org/my-repo").unwrap(),
+            "my-org_my-repo".to_string()
+        );
+
+        // Repo name with dots (e.g., config files or versioned repos)
+        assert_eq!(
+            sanitize_repo_name("owner/repo.js").unwrap(),
+            "owner_repo.js".to_string()
+        );
+
+        // Repo name with underscores
+        assert_eq!(
+            sanitize_repo_name("my_org/my_repo").unwrap(),
+            "my_org_my_repo".to_string()
+        );
+
+        // Alphanumeric only
+        assert_eq!(
+            sanitize_repo_name("owner123/repo456").unwrap(),
+            "owner123_repo456".to_string()
+        );
+    }
+
+    #[test]
+    fn test_sanitize_repo_name_path_traversal() {
+        // Path traversal with ..
+        assert!(sanitize_repo_name("..").is_err());
+        assert!(sanitize_repo_name("../foo").is_err());
+        assert!(sanitize_repo_name("foo/../bar").is_err());
+        assert!(sanitize_repo_name("foo/..").is_err());
+
+        // Absolute path attempts
+        assert!(sanitize_repo_name("/etc/passwd").is_err());
+        assert!(sanitize_repo_name("\\Windows\\System32").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_repo_name_hidden_files() {
+        // Starting with dot (hidden file/directory)
+        assert!(sanitize_repo_name(".hidden").is_err());
+        assert!(sanitize_repo_name(".config/repo").is_err());
+
+        // Note: .github is a valid org name on GitHub, but our function rejects
+        // names starting with dots for security. This is intentional.
+    }
+
+    #[test]
+    fn test_sanitize_repo_name_invalid_characters() {
+        // Space
+        assert!(sanitize_repo_name("owner/repo name").is_err());
+
+        // Special characters
+        assert!(sanitize_repo_name("owner/repo@123").is_err());
+        assert!(sanitize_repo_name("owner/repo#123").is_err());
+        assert!(sanitize_repo_name("owner/repo$var").is_err());
+        assert!(sanitize_repo_name("owner/repo%20").is_err());
+        assert!(sanitize_repo_name("owner/repo&foo").is_err());
+        assert!(sanitize_repo_name("owner/repo*").is_err());
+        assert!(sanitize_repo_name("owner/repo;cmd").is_err());
+        assert!(sanitize_repo_name("owner/repo|pipe").is_err());
+
+        // Backtick (command injection)
+        assert!(sanitize_repo_name("owner/repo`cmd`").is_err());
+
+        // Parentheses
+        assert!(sanitize_repo_name("owner/repo(1)").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_repo_name_unicode() {
+        // Note: The current implementation uses is_alphanumeric() which accepts
+        // Unicode alphanumeric characters. This is intentional to support
+        // international repository names on GitHub.
+        // Japanese characters are alphanumeric in Unicode
+        assert!(sanitize_repo_name("owner/日本語").is_ok());
+
+        // Emoji are not alphanumeric
+        assert!(sanitize_repo_name("owner/repo🚀").is_err());
+
+        // Fullwidth dot/period (U+FF0E) is not alphanumeric
+        assert!(sanitize_repo_name("owner/．．").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_repo_name_edge_cases() {
+        // Empty components (multiple slashes become multiple underscores)
+        // This is acceptable as it doesn't pose a security risk
+        let result = sanitize_repo_name("owner//repo");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "owner__repo");
+
+        // Single name without slash
+        assert_eq!(
+            sanitize_repo_name("simple-repo").unwrap(),
+            "simple-repo".to_string()
+        );
+    }
+}

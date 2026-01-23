@@ -208,6 +208,9 @@ fn truncate(s: &str, max_len: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max_len {
         s.to_string()
+    } else if max_len <= 3 {
+        // When max_len is too small for ellipsis, just take max_len chars without ellipsis
+        s.chars().take(max_len).collect()
     } else {
         let truncated: String = s.chars().take(max_len - 3).collect();
         format!("{}...", truncated)
@@ -421,5 +424,15 @@ mod tests {
         let unicode = "こんにちは世界";
         let truncated_unicode = truncate(unicode, 5);
         assert!(truncated_unicode.chars().count() <= 5);
+
+        // Edge case: max_len <= 3 (where ellipsis would not fit)
+        // Should return first max_len chars without ellipsis
+        assert_eq!(truncate("hello", 2), "he");
+        assert_eq!(truncate("hello", 3), "hel");
+        assert_eq!(truncate("hello", 1), "h");
+        assert_eq!(truncate("hello", 0), "");
+
+        // Edge case: max_len = 4 (just enough for 1 char + ellipsis)
+        assert_eq!(truncate("hello", 4), "h...");
     }
 }

@@ -48,7 +48,6 @@ struct Args {
     /// Working directory for AI agents (default: current directory)
     #[arg(long)]
     working_dir: Option<String>,
-
 }
 
 /// Restore terminal to normal state

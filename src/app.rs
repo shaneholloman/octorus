@@ -1362,6 +1362,9 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max_chars {
         s.to_string()
+    } else if max_chars <= 3 {
+        // When max_chars is too small for ellipsis, just take max_chars chars without ellipsis
+        s.chars().take(max_chars).collect()
     } else {
         let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
         format!("{}...", truncated)

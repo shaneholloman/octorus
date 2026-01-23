@@ -15,8 +15,77 @@ use crate::ai::adapter::{
 };
 use crate::ai::orchestrator::RallyEvent;
 
-const REVIEWER_SCHEMA: &str = include_str!("../schemas/reviewer.json");
-const REVIEWEE_SCHEMA: &str = include_str!("../schemas/reviewee.json");
+// Codex requires additionalProperties: false for all objects in the schema
+const REVIEWER_SCHEMA: &str = r#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReviewerOutput",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["approve", "request_changes", "comment"]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "comments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string"},
+          "line": {"type": "integer"},
+          "body": {"type": "string"},
+          "severity": {"type": "string", "enum": ["critical", "major", "minor", "suggestion"]}
+        },
+        "required": ["path", "line", "body", "severity"]
+      }
+    },
+    "blocking_issues": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "required": ["action", "summary", "comments", "blocking_issues"]
+}"#;
+
+const REVIEWEE_SCHEMA: &str = r#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RevieweeOutput",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "needs_clarification", "needs_permission", "error"]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "files_modified": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "question": {
+      "type": "string"
+    },
+    "permission_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {"type": "string"},
+        "reason": {"type": "string"}
+      },
+      "required": ["action", "reason"]
+    },
+    "error_details": {
+      "type": "string"
+    }
+  },
+  "required": ["status", "summary", "files_modified"]
+}"#;
 
 /// Codex-specific errors
 #[derive(Debug, Error)]
@@ -199,29 +268,35 @@ impl CodexAdapter {
                 self.send_event(RallyEvent::AgentThinking("Starting...".to_string()))
                     .await;
             }
-            CodexEvent::TurnStarted { .. } => {
+            CodexEvent::TurnStarted => {
                 self.send_event(RallyEvent::AgentThinking("Processing...".to_string()))
                     .await;
             }
-            CodexEvent::TurnCompleted { result, .. } => {
-                if let Some(result_value) = result {
-                    return Ok(Some(CodexResponse {
-                        session_id: thread_id.clone().unwrap_or_default(),
-                        result: Some(result_value.clone()),
-                    }));
-                }
+            CodexEvent::TurnCompleted { .. } => {
+                // In Codex CLI, the result comes from item.completed with type=agent_message
+                // turn.completed only has usage info, no result
             }
             CodexEvent::TurnFailed { error } => {
+                let reason = error
+                    .as_ref()
+                    .map(|e| e.message.clone())
+                    .unwrap_or_else(|| "Unknown error".to_string());
+                return Err(CodexError::TurnFailed { reason }.into());
+            }
+            CodexEvent::Error { message } => {
                 return Err(CodexError::TurnFailed {
-                    reason: error.clone(),
+                    reason: message.clone(),
                 }
                 .into());
             }
             CodexEvent::ItemStarted { item } | CodexEvent::ItemUpdated { item } => {
-                self.handle_item_event(item, false).await;
+                self.handle_item_event(item, thread_id, false).await;
             }
             CodexEvent::ItemCompleted { item } => {
-                self.handle_item_event(item, true).await;
+                // Check if this is the final agent_message with structured output
+                if let Some(result) = self.handle_item_event(item, thread_id, true).await {
+                    return Ok(Some(result));
+                }
             }
             CodexEvent::Unknown => {
                 // Ignore unknown events
@@ -230,34 +305,59 @@ impl CodexAdapter {
         Ok(None)
     }
 
-    /// Handle item events (command, message, file_change)
-    async fn handle_item_event(&self, item: &CodexItem, completed: bool) {
-        match item {
-            CodexItem::Command { command, output } => {
+    /// Handle item events and return result if it's the final agent_message
+    async fn handle_item_event(
+        &self,
+        item: &CodexItem,
+        thread_id: &Option<String>,
+        completed: bool,
+    ) -> Option<CodexResponse> {
+        match item.item_type.as_str() {
+            "agent_message" => {
                 if completed {
-                    self.send_event(RallyEvent::AgentToolResult(
-                        command.clone(),
-                        output.clone().unwrap_or_else(|| "completed".to_string()),
-                    ))
-                    .await;
+                    // The text field contains the JSON result as a string
+                    if let Some(ref text) = item.text {
+                        // Try to parse as JSON
+                        if let Ok(result) = serde_json::from_str::<serde_json::Value>(text) {
+                            self.send_event(RallyEvent::AgentText("Review completed.".to_string()))
+                                .await;
+                            return Some(CodexResponse {
+                                session_id: thread_id.clone().unwrap_or_default(),
+                                result: Some(result),
+                            });
+                        }
+                        // If not JSON, just show as text
+                        self.send_event(RallyEvent::AgentText(text.clone())).await;
+                    }
+                } else if let Some(ref text) = item.text {
+                    self.send_event(RallyEvent::AgentThinking(text.clone()))
+                        .await;
+                }
+            }
+            "function_call" | "command" => {
+                let tool_name = item
+                    .name
+                    .clone()
+                    .or_else(|| item.command.clone())
+                    .unwrap_or_else(|| "tool".to_string());
+
+                if completed {
+                    let output = item
+                        .output
+                        .clone()
+                        .unwrap_or_else(|| "completed".to_string());
+                    self.send_event(RallyEvent::AgentToolResult(tool_name, output))
+                        .await;
                 } else {
                     self.send_event(RallyEvent::AgentToolUse(
-                        command.clone(),
+                        tool_name,
                         "running...".to_string(),
                     ))
                     .await;
                 }
             }
-            CodexItem::Message { content } => {
-                if completed {
-                    self.send_event(RallyEvent::AgentText(content.clone()))
-                        .await;
-                } else {
-                    self.send_event(RallyEvent::AgentThinking(content.clone()))
-                        .await;
-                }
-            }
-            CodexItem::FileChange { path, .. } => {
+            "file_edit" | "file_change" => {
+                let path = item.path.clone().unwrap_or_else(|| "file".to_string());
                 if completed {
                     self.send_event(RallyEvent::AgentToolResult(
                         format!("edit:{}", path),
@@ -272,8 +372,9 @@ impl CodexAdapter {
                     .await;
                 }
             }
-            CodexItem::Unknown => {}
+            _ => {}
         }
+        None
     }
 }
 
@@ -361,28 +462,27 @@ impl AgentAdapter for CodexAdapter {
     }
 }
 
-// Codex event types (type-safe enum with serde tag)
+// Codex event types based on actual CLI output
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type")]
 pub enum CodexEvent {
     #[serde(rename = "thread.started")]
     ThreadStarted { thread_id: String },
     #[serde(rename = "turn.started")]
-    TurnStarted {
-        #[serde(default)]
-        #[allow(dead_code)]
-        turn_id: Option<String>,
-    },
+    TurnStarted,
     #[serde(rename = "turn.completed")]
     TurnCompleted {
         #[serde(default)]
         #[allow(dead_code)]
-        turn_id: Option<String>,
-        #[serde(default)]
-        result: Option<serde_json::Value>,
+        usage: Option<serde_json::Value>,
     },
     #[serde(rename = "turn.failed")]
-    TurnFailed { error: String },
+    TurnFailed {
+        #[serde(default)]
+        error: Option<CodexErrorInfo>,
+    },
+    #[serde(rename = "error")]
+    Error { message: String },
     #[serde(rename = "item.started")]
     ItemStarted { item: CodexItem },
     #[serde(rename = "item.updated")]
@@ -393,26 +493,36 @@ pub enum CodexEvent {
     Unknown,
 }
 
+/// Error info in turn.failed event
 #[derive(Debug, Deserialize)]
-#[serde(tag = "item_type", rename_all = "snake_case")]
-pub enum CodexItem {
-    #[serde(rename = "command")]
-    Command {
-        command: String,
-        #[serde(default)]
-        output: Option<String>,
-    },
-    #[serde(rename = "message")]
-    Message { content: String },
-    #[serde(rename = "file_change")]
-    FileChange {
-        path: String,
-        #[serde(default)]
-        #[allow(dead_code)]
-        diff: Option<String>,
-    },
-    #[serde(other)]
-    Unknown,
+pub struct CodexErrorInfo {
+    #[serde(default)]
+    pub message: String,
+}
+
+/// Codex item structure (not tagged enum, uses "type" field)
+#[derive(Debug, Deserialize)]
+pub struct CodexItem {
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub id: Option<String>,
+    #[serde(rename = "type", default)]
+    pub item_type: String,
+    /// Text content for agent_message
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Command string for function_call/command
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Function name for function_call
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Output for completed commands
+    #[serde(default)]
+    pub output: Option<String>,
+    /// File path for file_edit
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// Codex response structure
@@ -552,76 +662,70 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_turn_completed_event() {
-        let json = r#"{"type": "turn.completed", "turn_id": "turn_1", "result": {"action": "approve", "summary": "LGTM", "comments": [], "blocking_issues": []}}"#;
+    fn test_parse_turn_started_event() {
+        let json = r#"{"type": "turn.started"}"#;
         let event: CodexEvent = serde_json::from_str(json).unwrap();
-        match event {
-            CodexEvent::TurnCompleted { turn_id, result } => {
-                assert_eq!(turn_id, Some("turn_1".to_string()));
-                assert!(result.is_some());
-            }
-            _ => panic!("Expected TurnCompleted event"),
-        }
+        assert!(matches!(event, CodexEvent::TurnStarted));
+    }
+
+    #[test]
+    fn test_parse_turn_completed_event() {
+        let json = r#"{"type": "turn.completed", "usage": {"input_tokens": 100}}"#;
+        let event: CodexEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, CodexEvent::TurnCompleted { .. }));
     }
 
     #[test]
     fn test_parse_turn_failed_event() {
-        let json = r#"{"type": "turn.failed", "error": "Something went wrong"}"#;
+        let json = r#"{"type": "turn.failed", "error": {"message": "Something went wrong"}}"#;
         let event: CodexEvent = serde_json::from_str(json).unwrap();
         match event {
             CodexEvent::TurnFailed { error } => {
-                assert_eq!(error, "Something went wrong");
+                assert_eq!(error.unwrap().message, "Something went wrong");
             }
             _ => panic!("Expected TurnFailed event"),
         }
     }
 
     #[test]
-    fn test_parse_item_command_event() {
-        let json =
-            r#"{"type": "item.started", "item": {"item_type": "command", "command": "ls -la"}}"#;
+    fn test_parse_error_event() {
+        let json = r#"{"type": "error", "message": "API error occurred"}"#;
         let event: CodexEvent = serde_json::from_str(json).unwrap();
         match event {
-            CodexEvent::ItemStarted { item } => match item {
-                CodexItem::Command { command, output } => {
-                    assert_eq!(command, "ls -la");
-                    assert!(output.is_none());
-                }
-                _ => panic!("Expected Command item"),
-            },
-            _ => panic!("Expected ItemStarted event"),
+            CodexEvent::Error { message } => {
+                assert_eq!(message, "API error occurred");
+            }
+            _ => panic!("Expected Error event"),
         }
     }
 
     #[test]
-    fn test_parse_item_message_event() {
-        let json =
-            r#"{"type": "item.completed", "item": {"item_type": "message", "content": "Done!"}}"#;
+    fn test_parse_item_completed_agent_message() {
+        let json = r#"{"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "{\"action\":\"approve\",\"summary\":\"LGTM\",\"comments\":[],\"blocking_issues\":[]}"}}"#;
         let event: CodexEvent = serde_json::from_str(json).unwrap();
         match event {
-            CodexEvent::ItemCompleted { item } => match item {
-                CodexItem::Message { content } => {
-                    assert_eq!(content, "Done!");
-                }
-                _ => panic!("Expected Message item"),
-            },
+            CodexEvent::ItemCompleted { item } => {
+                assert_eq!(item.item_type, "agent_message");
+                assert!(item.text.is_some());
+                // Verify the text contains valid JSON
+                let text = item.text.unwrap();
+                let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(parsed["action"], "approve");
+            }
             _ => panic!("Expected ItemCompleted event"),
         }
     }
 
     #[test]
-    fn test_parse_item_file_change_event() {
-        let json = r#"{"type": "item.updated", "item": {"item_type": "file_change", "path": "src/main.rs", "diff": "+new line"}}"#;
+    fn test_parse_item_function_call() {
+        let json = r#"{"type": "item.started", "item": {"id": "item_1", "type": "function_call", "name": "read_file", "command": "cat src/main.rs"}}"#;
         let event: CodexEvent = serde_json::from_str(json).unwrap();
         match event {
-            CodexEvent::ItemUpdated { item } => match item {
-                CodexItem::FileChange { path, diff } => {
-                    assert_eq!(path, "src/main.rs");
-                    assert_eq!(diff, Some("+new line".to_string()));
-                }
-                _ => panic!("Expected FileChange item"),
-            },
-            _ => panic!("Expected ItemUpdated event"),
+            CodexEvent::ItemStarted { item } => {
+                assert_eq!(item.item_type, "function_call");
+                assert_eq!(item.name, Some("read_file".to_string()));
+            }
+            _ => panic!("Expected ItemStarted event"),
         }
     }
 
@@ -629,20 +733,7 @@ mod tests {
     fn test_parse_unknown_event() {
         let json = r#"{"type": "some.unknown.event", "data": "whatever"}"#;
         let event: CodexEvent = serde_json::from_str(json).unwrap();
-        matches!(event, CodexEvent::Unknown);
-    }
-
-    #[test]
-    fn test_parse_unknown_item() {
-        let json =
-            r#"{"type": "item.started", "item": {"item_type": "unknown_type", "foo": "bar"}}"#;
-        let event: CodexEvent = serde_json::from_str(json).unwrap();
-        match event {
-            CodexEvent::ItemStarted { item } => {
-                matches!(item, CodexItem::Unknown);
-            }
-            _ => panic!("Expected ItemStarted event"),
-        }
+        assert!(matches!(event, CodexEvent::Unknown));
     }
 
     #[test]

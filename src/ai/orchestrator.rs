@@ -34,20 +34,27 @@ pub enum RallyState {
     WaitingForClarification,
     WaitingForPermission,
     Completed,
+    Aborted,
     Error,
 }
 
 impl RallyState {
-    /// Rally が実行中（完了・エラー以外）かどうか
+    /// Rally が実行中（完了・エラー・中断以外）かどうか
     #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
-        !matches!(self, RallyState::Completed | RallyState::Error)
+        !matches!(
+            self,
+            RallyState::Completed | RallyState::Aborted | RallyState::Error
+        )
     }
 
-    /// Rally が完了またはエラーで終了したかどうか
+    /// Rally が完了、中断、またはエラーで終了したかどうか
     #[allow(dead_code)]
     pub fn is_finished(&self) -> bool {
-        matches!(self, RallyState::Completed | RallyState::Error)
+        matches!(
+            self,
+            RallyState::Completed | RallyState::Aborted | RallyState::Error
+        )
     }
 }
 
@@ -85,6 +92,17 @@ pub enum RallyResult {
     Error { iteration: u32, error: String },
 }
 
+/// Command sent from TUI to Orchestrator
+#[derive(Debug)]
+pub enum OrchestratorCommand {
+    /// User provided clarification answer
+    ClarificationResponse(String),
+    /// User granted or denied permission
+    PermissionResponse(bool),
+    /// User requested abort
+    Abort,
+}
+
 /// Main orchestrator for AI rally
 pub struct Orchestrator {
     repo: String,
@@ -98,6 +116,8 @@ pub struct Orchestrator {
     last_fix: Option<RevieweeOutput>,
     event_sender: mpsc::Sender<RallyEvent>,
     prompt_loader: PromptLoader,
+    /// Command receiver for TUI commands
+    command_receiver: Option<mpsc::Receiver<OrchestratorCommand>>,
 }
 
 impl Orchestrator {
@@ -106,6 +126,7 @@ impl Orchestrator {
         pr_number: u32,
         config: AiConfig,
         event_sender: mpsc::Sender<RallyEvent>,
+        command_receiver: Option<mpsc::Receiver<OrchestratorCommand>>,
     ) -> Result<Self> {
         let mut reviewer_adapter = create_adapter(&config.reviewer)?;
         let mut reviewee_adapter = create_adapter(&config.reviewee)?;
@@ -129,6 +150,7 @@ impl Orchestrator {
             last_fix: None,
             event_sender,
             prompt_loader,
+            command_receiver,
         })
     }
 
@@ -288,12 +310,43 @@ impl Orchestrator {
                         ))
                         .await;
 
-                        // In the TUI, this will pause and wait for user input
-                        // For now, we'll return and let the caller handle it
-                        return Ok(RallyResult::Aborted {
-                            iteration,
-                            reason: format!("Clarification needed: {}", question),
-                        });
+                        // Wait for user command
+                        match self.wait_for_command().await {
+                            Some(OrchestratorCommand::ClarificationResponse(answer)) => {
+                                // Handle clarification response
+                                if let Err(e) = self.handle_clarification_response(&answer).await {
+                                    self.session.update_state(RallyState::Error);
+                                    write_session(&self.session)?;
+                                    self.send_event(RallyEvent::Error(e.to_string())).await;
+                                    self.send_event(RallyEvent::StateChanged(RallyState::Error))
+                                        .await;
+                                    return Ok(RallyResult::Error {
+                                        iteration,
+                                        error: e.to_string(),
+                                    });
+                                }
+                                // Continue to next iteration
+                            }
+                            Some(OrchestratorCommand::Abort) | None => {
+                                let reason = format!("Clarification aborted: {}", question);
+                                self.session.update_state(RallyState::Aborted);
+                                write_session(&self.session)?;
+                                self.send_event(RallyEvent::Log(reason.clone())).await;
+                                self.send_event(RallyEvent::StateChanged(RallyState::Aborted))
+                                    .await;
+                                return Ok(RallyResult::Aborted { iteration, reason });
+                            }
+                            Some(OrchestratorCommand::PermissionResponse(_)) => {
+                                // Ignore invalid command
+                                let reason = format!("Clarification needed: {}", question);
+                                self.session.update_state(RallyState::Aborted);
+                                write_session(&self.session)?;
+                                self.send_event(RallyEvent::Log(reason.clone())).await;
+                                self.send_event(RallyEvent::StateChanged(RallyState::Aborted))
+                                    .await;
+                                return Ok(RallyResult::Aborted { iteration, reason });
+                            }
+                        }
                     }
                 }
                 RevieweeStatus::NeedsPermission => {
@@ -309,10 +362,58 @@ impl Orchestrator {
                         self.send_event(RallyEvent::StateChanged(RallyState::WaitingForPermission))
                             .await;
 
-                        return Ok(RallyResult::Aborted {
-                            iteration,
-                            reason: format!("Permission needed: {}", perm.action),
-                        });
+                        // Wait for user command
+                        match self.wait_for_command().await {
+                            Some(OrchestratorCommand::PermissionResponse(approved)) => {
+                                if approved {
+                                    // Handle permission granted
+                                    if let Err(e) =
+                                        self.handle_permission_granted(&perm.action).await
+                                    {
+                                        self.session.update_state(RallyState::Error);
+                                        write_session(&self.session)?;
+                                        self.send_event(RallyEvent::Error(e.to_string())).await;
+                                        self.send_event(RallyEvent::StateChanged(
+                                            RallyState::Error,
+                                        ))
+                                        .await;
+                                        return Ok(RallyResult::Error {
+                                            iteration,
+                                            error: e.to_string(),
+                                        });
+                                    }
+                                    // Continue to next iteration
+                                } else {
+                                    // Permission denied
+                                    let reason = format!("Permission denied: {}", perm.action);
+                                    self.session.update_state(RallyState::Aborted);
+                                    write_session(&self.session)?;
+                                    self.send_event(RallyEvent::Log(reason.clone())).await;
+                                    self.send_event(RallyEvent::StateChanged(RallyState::Aborted))
+                                        .await;
+                                    return Ok(RallyResult::Aborted { iteration, reason });
+                                }
+                            }
+                            Some(OrchestratorCommand::Abort) | None => {
+                                let reason = format!("Permission aborted: {}", perm.action);
+                                self.session.update_state(RallyState::Aborted);
+                                write_session(&self.session)?;
+                                self.send_event(RallyEvent::Log(reason.clone())).await;
+                                self.send_event(RallyEvent::StateChanged(RallyState::Aborted))
+                                    .await;
+                                return Ok(RallyResult::Aborted { iteration, reason });
+                            }
+                            Some(OrchestratorCommand::ClarificationResponse(_)) => {
+                                // Ignore invalid command
+                                let reason = format!("Permission needed: {}", perm.action);
+                                self.session.update_state(RallyState::Aborted);
+                                write_session(&self.session)?;
+                                self.send_event(RallyEvent::Log(reason.clone())).await;
+                                self.send_event(RallyEvent::StateChanged(RallyState::Aborted))
+                                    .await;
+                                return Ok(RallyResult::Aborted { iteration, reason });
+                            }
+                        }
                     }
                 }
                 RevieweeStatus::Error => {
@@ -342,12 +443,20 @@ impl Orchestrator {
         })
     }
 
-    /// Continue after clarification answer
-    ///
-    /// For Clarification/Permission flow (not yet implemented)
-    /// See CLAUDE.md "Known Limitations"
-    #[allow(dead_code)]
-    pub async fn continue_with_clarification(&mut self, answer: &str) -> Result<()> {
+    /// Wait for a command from the TUI
+    async fn wait_for_command(&mut self) -> Option<OrchestratorCommand> {
+        let rx = self.command_receiver.as_mut()?;
+        rx.recv().await
+    }
+
+    /// Handle clarification response from user
+    async fn handle_clarification_response(&mut self, answer: &str) -> Result<()> {
+        self.send_event(RallyEvent::Log(format!(
+            "User provided clarification: {}",
+            answer
+        )))
+        .await;
+
         // Ask reviewer for clarification and log the response
         let prompt = build_clarification_prompt(answer);
         let reviewer_response = self.reviewer_adapter.continue_reviewer(&prompt).await?;
@@ -363,24 +472,42 @@ impl Orchestrator {
         self.reviewee_adapter.continue_reviewee(answer).await?;
 
         self.session.update_state(RallyState::RevieweeFix);
+        self.send_event(RallyEvent::StateChanged(RallyState::RevieweeFix))
+            .await;
         write_session(&self.session)?;
 
         Ok(())
     }
 
-    /// Continue after permission granted
-    ///
-    /// For Clarification/Permission flow (not yet implemented)
-    /// See CLAUDE.md "Known Limitations"
-    #[allow(dead_code)]
-    pub async fn continue_with_permission(&mut self, action: &str) -> Result<()> {
+    /// Handle permission granted from user
+    async fn handle_permission_granted(&mut self, action: &str) -> Result<()> {
+        self.send_event(RallyEvent::Log(format!(
+            "User granted permission for: {}",
+            action
+        )))
+        .await;
+
         let prompt = build_permission_granted_prompt(action);
         self.reviewee_adapter.continue_reviewee(&prompt).await?;
 
         self.session.update_state(RallyState::RevieweeFix);
+        self.send_event(RallyEvent::StateChanged(RallyState::RevieweeFix))
+            .await;
         write_session(&self.session)?;
 
         Ok(())
+    }
+
+    /// Continue after clarification answer (legacy, kept for compatibility)
+    #[allow(dead_code)]
+    pub async fn continue_with_clarification(&mut self, answer: &str) -> Result<()> {
+        self.handle_clarification_response(answer).await
+    }
+
+    /// Continue after permission granted (legacy, kept for compatibility)
+    #[allow(dead_code)]
+    pub async fn continue_with_permission(&mut self, action: &str) -> Result<()> {
+        self.handle_permission_granted(action).await
     }
 
     async fn run_reviewer_with_timeout(
@@ -625,6 +752,118 @@ fn is_bot_user(login: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn test_orchestrator_command_variants() {
+        // Test ClarificationResponse
+        let cmd = OrchestratorCommand::ClarificationResponse("test answer".to_string());
+        match cmd {
+            OrchestratorCommand::ClarificationResponse(answer) => {
+                assert_eq!(answer, "test answer");
+            }
+            _ => panic!("Expected ClarificationResponse"),
+        }
+
+        // Test PermissionResponse approved
+        let cmd = OrchestratorCommand::PermissionResponse(true);
+        match cmd {
+            OrchestratorCommand::PermissionResponse(approved) => {
+                assert!(approved);
+            }
+            _ => panic!("Expected PermissionResponse"),
+        }
+
+        // Test PermissionResponse denied
+        let cmd = OrchestratorCommand::PermissionResponse(false);
+        match cmd {
+            OrchestratorCommand::PermissionResponse(approved) => {
+                assert!(!approved);
+            }
+            _ => panic!("Expected PermissionResponse"),
+        }
+
+        // Test Abort
+        let cmd = OrchestratorCommand::Abort;
+        assert!(matches!(cmd, OrchestratorCommand::Abort));
+    }
+
+    #[tokio::test]
+    async fn test_command_channel_clarification() {
+        let (tx, mut rx) = mpsc::channel::<OrchestratorCommand>(1);
+
+        // Send clarification response
+        tx.send(OrchestratorCommand::ClarificationResponse(
+            "user's answer".to_string(),
+        ))
+        .await
+        .unwrap();
+
+        // Receive and verify
+        let cmd = rx.recv().await.unwrap();
+        match cmd {
+            OrchestratorCommand::ClarificationResponse(answer) => {
+                assert_eq!(answer, "user's answer");
+            }
+            _ => panic!("Expected ClarificationResponse"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_command_channel_permission_granted() {
+        let (tx, mut rx) = mpsc::channel::<OrchestratorCommand>(1);
+
+        tx.send(OrchestratorCommand::PermissionResponse(true))
+            .await
+            .unwrap();
+
+        let cmd = rx.recv().await.unwrap();
+        match cmd {
+            OrchestratorCommand::PermissionResponse(approved) => {
+                assert!(approved, "Permission should be granted");
+            }
+            _ => panic!("Expected PermissionResponse"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_command_channel_permission_denied() {
+        let (tx, mut rx) = mpsc::channel::<OrchestratorCommand>(1);
+
+        tx.send(OrchestratorCommand::PermissionResponse(false))
+            .await
+            .unwrap();
+
+        let cmd = rx.recv().await.unwrap();
+        match cmd {
+            OrchestratorCommand::PermissionResponse(approved) => {
+                assert!(!approved, "Permission should be denied");
+            }
+            _ => panic!("Expected PermissionResponse"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_command_channel_abort() {
+        let (tx, mut rx) = mpsc::channel::<OrchestratorCommand>(1);
+
+        tx.send(OrchestratorCommand::Abort).await.unwrap();
+
+        let cmd = rx.recv().await.unwrap();
+        assert!(matches!(cmd, OrchestratorCommand::Abort));
+    }
+
+    #[tokio::test]
+    async fn test_command_channel_closed_returns_none() {
+        let (tx, mut rx) = mpsc::channel::<OrchestratorCommand>(1);
+
+        // Drop sender to close channel
+        drop(tx);
+
+        // Receive should return None
+        let cmd = rx.recv().await;
+        assert!(cmd.is_none());
+    }
 
     #[test]
     fn test_is_bot_user() {
@@ -651,6 +890,7 @@ mod tests {
         assert!(RallyState::WaitingForClarification.is_active());
         assert!(RallyState::WaitingForPermission.is_active());
         assert!(!RallyState::Completed.is_active());
+        assert!(!RallyState::Aborted.is_active());
         assert!(!RallyState::Error.is_active());
     }
 
@@ -662,6 +902,7 @@ mod tests {
         assert!(!RallyState::WaitingForClarification.is_finished());
         assert!(!RallyState::WaitingForPermission.is_finished());
         assert!(RallyState::Completed.is_finished());
+        assert!(RallyState::Aborted.is_finished());
         assert!(RallyState::Error.is_finished());
     }
 }

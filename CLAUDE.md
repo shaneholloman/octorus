@@ -181,8 +181,13 @@ Orchestrator.run()
   │           └── RevieweeOutput saved to history/001_fix.json
   │
   └── Iteration 2+
-        └── run_reviewer(fetch updated diff via `gh pr diff`, include fix summary)
-              └── Re-review with current PR state
+        └── fetch_current_diff()
+              ├── 1. git diff origin/{base_branch}...HEAD (ローカル優先)
+              │     └── 未プッシュのローカル変更を検出
+              └── 2. gh pr diff (GitHub API フォールバック)
+                    └── push 済み or ローカル diff が空の場合に使用
+        └── run_reviewer(updated diff, include fix summary)
+              └── Re-review with current state
 ```
 
 ### Tool Permissions

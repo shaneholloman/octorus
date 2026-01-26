@@ -206,23 +206,39 @@ AI Rally is an automated PR review and fix cycle that uses two AI agents:
 └────────┬────────┘
          ▼
 ┌─────────────────┐
-│    Reviewer     │  AI reviews the diff
-│ (Claude/Codex)  │  → Posts comments to PR
+│    Reviewer     │  AI reviews the PR diff
+│ (Claude/Codex)  │  → Posts review comments to PR
 └────────┬────────┘
          │
     ┌────┴────┐
     │ Approve?│
     └────┬────┘
-     No  │  Yes
-         │   └──→ Done ✓
+     No  │  Yes ──→ Done ✓
          ▼
 ┌─────────────────┐
 │    Reviewee     │  AI fixes issues
-│ (Claude/Codex)  │  → Commits changes locally
+│ (Claude/Codex)  │  → Commits locally (no push by default)
 └────────┬────────┘
          │
-         ▼
-    Next Iteration
+    ┌────┴──────────────┐
+    │                   │
+    ▼                   ▼
+ Completed    NeedsClarification /
+    │          NeedsPermission
+    │                   │
+    │          User responds (y/n)
+    │                   │
+    └─────────┬─────────┘
+              ▼
+┌───────────────────────┐
+│  Re-review (Reviewer) │  Updated diff:
+│                       │  git diff (local) or
+│                       │  gh pr diff (if pushed)
+└───────────┬───────────┘
+            │
+       ┌────┴────┐
+       │ Approve?│  ... repeat until approved
+       └─────────┘       or max iterations
 ```
 
 ### Features
@@ -230,8 +246,9 @@ AI Rally is an automated PR review and fix cycle that uses two AI agents:
 - **PR Integration**: Review comments are automatically posted to the PR
 - **External Bot Support**: Collects feedback from Copilot, CodeRabbit, and other bots
 - **Safe Operations**: Dangerous git operations (`--force`, `reset --hard`) are prohibited
-- **Session Persistence**: Rally state is saved and can be resumed
+- **Session Persistence**: Rally state is saved locally and can be resumed
 - **Interactive Flow**: When the AI agent needs clarification or permission, you can respond interactively
+- **Local Diff Support**: Re-review iterations prioritize local `git diff` for unpushed changes; falls back to `gh pr diff` when changes have been pushed
 - **Background Execution**: Press `b` to run rally in background while continuing to browse files
 
 ### Recommended Configuration

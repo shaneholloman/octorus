@@ -38,7 +38,7 @@ pub fn render(frame: &mut Frame, _app: &App) {
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from("  j/k, Down/Up    Move selection"),
-        Line::from("  Enter           View file diff"),
+        Line::from("  Enter           Open split view"),
         Line::from("  a               Approve PR"),
         Line::from("  r               Request changes"),
         Line::from("  c               Comment only"),
@@ -47,6 +47,30 @@ pub fn render(frame: &mut Frame, _app: &App) {
         Line::from("  R               Refresh (clear cache and reload)"),
         Line::from("  ?               Toggle help"),
         Line::from("  q               Quit"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Split View",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            "  File List Focus:",
+            Style::default().fg(Color::DarkGray),
+        )]),
+        Line::from("  j/k, Down/Up    Move file selection (diff follows)"),
+        Line::from("  Enter, →, l     Focus diff pane"),
+        Line::from("  ←, h, q         Back to file list"),
+        Line::from(vec![Span::styled(
+            "  Diff Focus:",
+            Style::default().fg(Color::DarkGray),
+        )]),
+        Line::from("  j/k, Down/Up    Scroll diff"),
+        Line::from("  Ctrl-d/u        Page scroll"),
+        Line::from("  n/N             Next/prev comment"),
+        Line::from("  Enter           Open fullscreen diff"),
+        Line::from("  ←, h            Back to file focus"),
+        Line::from("  q               Back to file list"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Diff View",

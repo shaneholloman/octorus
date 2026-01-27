@@ -56,6 +56,7 @@ main.rs
 - **ui/**: TUI レンダリング（ratatui ベース）
   - `file_list.rs`: ファイル一覧画面
   - `diff_view.rs`: diff 表示画面（インラインコメント表示、キャッシュ管理）
+  - `split_view.rs`: 分割プレビュー画面（ファイル一覧 + diff プレビュー）
   - `comment_list.rs`: レビューコメント一覧画面
   - `ai_rally.rs`: AI Rally 画面
   - `help.rs`: ヘルプ画面
@@ -70,10 +71,23 @@ main.rs
 ### Key State Machines
 
 **AppState** (UI 状態):
-- `FileList` → `DiffView` → `CommentPreview` / `SuggestionPreview`
-- `FileList` → `CommentList` → `DiffView` (コメントジャンプ)
+
+```
+FileList ──[Enter/→/l]──> SplitViewFileList ──[Enter/→/l]──> SplitViewDiff ──[Enter]──> DiffView
+                            │                                    │                          │
+                            │[←/h/q/Esc]                         │[←/h]                     │[q/Esc]
+                            ▼                                    ▼                          ▼
+                          FileList                        SplitViewFileList          SplitViewDiff
+                                                                 │[q/Esc]
+                                                                 ▼
+                                                              FileList
+```
+
+- `DiffView` → `CommentPreview` / `SuggestionPreview`（戻り先は `preview_return_state` で管理）
+- `FileList` / `SplitViewFileList` → `CommentList`（戻り先は `previous_state` で管理）
+- `CommentList` → `DiffView` (コメントジャンプ、`diff_view_return_state = FileList`)
 - `FileList` → `AiRally` (AI Rally 画面)
-- `Help` (トグル)
+- `Help` (戻り先は `previous_state` で管理)
 
 **Diff View Features**:
 - インラインコメント表示: コメントがある行は `●` マーカーで表示

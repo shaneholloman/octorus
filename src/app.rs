@@ -16,6 +16,7 @@ use crate::github::comment::{DiscussionComment, ReviewComment};
 use crate::github::{self, ChangedFile, PullRequest};
 use crate::loader::{CommentSubmitResult, DataLoadResult};
 use crate::ui;
+use crate::ui::text_area::{TextArea, TextAreaAction};
 use std::time::Instant;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -81,6 +82,7 @@ pub enum AppState {
     AiRally,
     SplitViewFileList,
     SplitViewDiff,
+    ReplyInput,
 }
 
 /// Log event type for AI Rally
@@ -169,6 +171,13 @@ pub struct CommentData {
 }
 
 #[derive(Debug, Clone)]
+pub struct ReplyContext {
+    pub comment_id: u64,
+    pub reply_to_user: String,
+    pub reply_to_body: String,
+}
+
+#[derive(Debug, Clone)]
 pub enum DataState {
     Loading,
     Loaded {
@@ -206,6 +215,10 @@ pub struct App {
     pub file_comment_positions: Vec<CommentPosition>,
     // Set of diff line indices with comments (for fast lookup in render)
     pub file_comment_lines: HashSet<usize>,
+    /// インラインコメントパネルが開いているか（= フォーカス中）
+    pub comment_panel_open: bool,
+    /// インラインコメントパネルのスクロールオフセット（行単位）
+    pub comment_panel_scroll: u16,
     // Cached diff lines (syntax highlighted)
     pub diff_cache: Option<DiffCache>,
     // Discussion comments (PR conversation)
@@ -240,6 +253,12 @@ pub struct App {
     submission_result_time: Option<Instant>,
     /// Spinner animation frame counter (incremented each tick)
     pub spinner_frame: usize,
+    /// インラインコメントパネル内の選択インデックス
+    pub selected_inline_comment: usize,
+    /// 返信先のコンテキスト
+    pub reply_context: Option<ReplyContext>,
+    /// 返信入力テキストエリア
+    pub reply_text_area: TextArea,
     /// ジャンプ履歴スタック（Go to Definition / Jump Back 用）
     pub jump_stack: Vec<JumpLocation>,
     /// 'g' キー入力待ち状態（gd, gg などの2キーコマンド用）
@@ -279,6 +298,8 @@ impl App {
             comments_loading: false,
             file_comment_positions: vec![],
             file_comment_lines: HashSet::new(),
+            comment_panel_open: false,
+            comment_panel_scroll: 0,
             diff_cache: None,
             discussion_comments: None,
             selected_discussion_comment: 0,
@@ -301,6 +322,9 @@ impl App {
             submission_result: None,
             submission_result_time: None,
             spinner_frame: 0,
+            selected_inline_comment: 0,
+            reply_context: None,
+            reply_text_area: TextArea::new(),
             jump_stack: Vec::new(),
             pending_g_key: false,
             symbol_popup: None,
@@ -345,6 +369,8 @@ impl App {
             comments_loading: false,
             file_comment_positions: vec![],
             file_comment_lines: HashSet::new(),
+            comment_panel_open: false,
+            comment_panel_scroll: 0,
             diff_cache: None,
             discussion_comments: None,
             selected_discussion_comment: 0,
@@ -367,6 +393,9 @@ impl App {
             submission_result: None,
             submission_result_time: None,
             spinner_frame: 0,
+            selected_inline_comment: 0,
+            reply_context: None,
+            reply_text_area: TextArea::new(),
             jump_stack: Vec::new(),
             pending_g_key: false,
             symbol_popup: None,
@@ -534,8 +563,11 @@ impl App {
                 self.comment_submit_receiver = None;
                 self.submission_result = Some((true, "Submitted".to_string()));
                 self.submission_result_time = Some(Instant::now());
-                // Invalidate comment cache to force refresh on next open
+                // ファイルキャッシュを破棄してコメントを再取得
+                let _ = crate::cache::invalidate_comment_cache(&self.repo, self.pr_number);
                 self.review_comments = None;
+                self.load_review_comments();
+                self.update_file_comment_positions();
             }
             Ok(CommentSubmitResult::Error(e)) => {
                 self.comment_submitting = false;
@@ -744,6 +776,7 @@ impl App {
                     AppState::SplitViewDiff => {
                         self.handle_split_view_diff_input(key, terminal).await?
                     }
+                    AppState::ReplyInput => self.handle_reply_input(key)?,
                 }
             }
         }
@@ -892,9 +925,91 @@ impl App {
         }
 
         // 右ペインの実高さを計算（split view レイアウトと同じロジック）
-        let term_height = terminal.size()?.height as usize;
+        let term_size = terminal.size()?;
+        let term_height = term_size.height as usize;
+        let term_width = term_size.width as usize;
         // Header(3) + Footer(3) + border(2) = 8 を差し引き、65%の高さ
         let visible_lines = (term_height * 65 / 100).saturating_sub(8);
+        let panel_inner_width = self.comment_panel_inner_width(term_width);
+
+        // コメントパネルフォーカス中
+        if self.comment_panel_open {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let max_scroll = self.max_comment_panel_scroll(term_height, term_width);
+                    self.comment_panel_scroll =
+                        self.comment_panel_scroll.saturating_add(1).min(max_scroll);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.comment_panel_scroll = self.comment_panel_scroll.saturating_sub(1);
+                }
+                KeyCode::Char('n') => {
+                    let prev_line = self.selected_line;
+                    self.jump_to_next_comment();
+                    if self.selected_line != prev_line {
+                        self.comment_panel_scroll = 0;
+                        self.selected_inline_comment = 0;
+                        self.adjust_scroll(visible_lines);
+                    }
+                }
+                KeyCode::Char('N') => {
+                    let prev_line = self.selected_line;
+                    self.jump_to_prev_comment();
+                    if self.selected_line != prev_line {
+                        self.comment_panel_scroll = 0;
+                        self.selected_inline_comment = 0;
+                        self.adjust_scroll(visible_lines);
+                    }
+                }
+                KeyCode::Char(c) if c == self.config.keybindings.comment => {
+                    self.preview_return_state = AppState::SplitViewDiff;
+                    self.open_comment_editor(terminal).await?;
+                }
+                KeyCode::Char(c) if c == self.config.keybindings.suggestion => {
+                    self.preview_return_state = AppState::SplitViewDiff;
+                    self.open_suggestion_editor(terminal).await?;
+                }
+                KeyCode::Char('r') => {
+                    if self.has_comment_at_current_line() {
+                        self.preview_return_state = AppState::SplitViewDiff;
+                        self.enter_reply_input();
+                    }
+                }
+                KeyCode::Tab => {
+                    if self.has_comment_at_current_line() {
+                        let count = self.get_comment_indices_at_current_line().len();
+                        if count > 1 && self.selected_inline_comment + 1 < count {
+                            self.selected_inline_comment += 1;
+                            self.comment_panel_scroll =
+                                self.comment_panel_offset_for(self.selected_inline_comment, panel_inner_width);
+                        }
+                    }
+                }
+                KeyCode::BackTab => {
+                    if self.has_comment_at_current_line() {
+                        let count = self.get_comment_indices_at_current_line().len();
+                        if count > 1 && self.selected_inline_comment > 0 {
+                            self.selected_inline_comment -= 1;
+                            self.comment_panel_scroll =
+                                self.comment_panel_offset_for(self.selected_inline_comment, panel_inner_width);
+                        }
+                    }
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    self.comment_panel_open = false;
+                    self.comment_panel_scroll = 0;
+                    self.diff_view_return_state = AppState::SplitViewDiff;
+                    self.preview_return_state = AppState::DiffView;
+                    self.state = AppState::DiffView;
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.comment_panel_open = false;
+                    self.comment_panel_scroll = 0;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
 
         // pending_g_key: 2キーコマンド処理
         if self.pending_g_key {
@@ -902,6 +1017,10 @@ impl App {
             match key.code {
                 KeyCode::Char('d') => {
                     self.open_symbol_popup(terminal).await?;
+                    return Ok(());
+                }
+                KeyCode::Char('f') => {
+                    self.open_current_file_in_editor(terminal).await?;
                     return Ok(());
                 }
                 KeyCode::Char('g') => {
@@ -951,6 +1070,11 @@ impl App {
             KeyCode::Char('n') => self.jump_to_next_comment(),
             KeyCode::Char('N') => self.jump_to_prev_comment(),
             KeyCode::Enter => {
+                self.comment_panel_open = true;
+                self.comment_panel_scroll = 0;
+                self.selected_inline_comment = 0;
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
                 self.diff_view_return_state = AppState::SplitViewDiff;
                 self.preview_return_state = AppState::DiffView;
                 self.state = AppState::DiffView;
@@ -971,6 +1095,7 @@ impl App {
             }
             _ => {}
         }
+
         Ok(())
     }
 
@@ -1404,7 +1529,80 @@ impl App {
             return Ok(());
         }
 
-        let visible_lines = terminal.size()?.height.saturating_sub(8) as usize;
+        let term_size = terminal.size()?;
+        let term_h = term_size.height as usize;
+        let term_w = term_size.width as usize;
+        let visible_lines = term_h.saturating_sub(8);
+        let panel_inner_width = self.comment_panel_inner_width(term_w);
+
+        // コメントパネルフォーカス中
+        if self.comment_panel_open {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let max_scroll = self.max_comment_panel_scroll(term_h, term_w);
+                    self.comment_panel_scroll =
+                        self.comment_panel_scroll.saturating_add(1).min(max_scroll);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.comment_panel_scroll = self.comment_panel_scroll.saturating_sub(1);
+                }
+                KeyCode::Char('n') => {
+                    let prev_line = self.selected_line;
+                    self.jump_to_next_comment();
+                    if self.selected_line != prev_line {
+                        self.comment_panel_scroll = 0;
+                        self.selected_inline_comment = 0;
+                        self.adjust_scroll(visible_lines);
+                    }
+                }
+                KeyCode::Char('N') => {
+                    let prev_line = self.selected_line;
+                    self.jump_to_prev_comment();
+                    if self.selected_line != prev_line {
+                        self.comment_panel_scroll = 0;
+                        self.selected_inline_comment = 0;
+                        self.adjust_scroll(visible_lines);
+                    }
+                }
+                KeyCode::Char(c) if c == self.config.keybindings.comment => {
+                    self.open_comment_editor(terminal).await?;
+                }
+                KeyCode::Char(c) if c == self.config.keybindings.suggestion => {
+                    self.open_suggestion_editor(terminal).await?;
+                }
+                KeyCode::Char('r') => {
+                    if self.has_comment_at_current_line() {
+                        self.enter_reply_input();
+                    }
+                }
+                KeyCode::Tab => {
+                    if self.has_comment_at_current_line() {
+                        let count = self.get_comment_indices_at_current_line().len();
+                        if count > 1 && self.selected_inline_comment + 1 < count {
+                            self.selected_inline_comment += 1;
+                            self.comment_panel_scroll =
+                                self.comment_panel_offset_for(self.selected_inline_comment, panel_inner_width);
+                        }
+                    }
+                }
+                KeyCode::BackTab => {
+                    if self.has_comment_at_current_line() {
+                        let count = self.get_comment_indices_at_current_line().len();
+                        if count > 1 && self.selected_inline_comment > 0 {
+                            self.selected_inline_comment -= 1;
+                            self.comment_panel_scroll =
+                                self.comment_panel_offset_for(self.selected_inline_comment, panel_inner_width);
+                        }
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.comment_panel_open = false;
+                    self.comment_panel_scroll = 0;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
 
         // pending_g_key: 2キーコマンド処理
         if self.pending_g_key {
@@ -1412,6 +1610,10 @@ impl App {
             match key.code {
                 KeyCode::Char('d') => {
                     self.open_symbol_popup(terminal).await?;
+                    return Ok(());
+                }
+                KeyCode::Char('f') => {
+                    self.open_current_file_in_editor(terminal).await?;
                     return Ok(());
                 }
                 KeyCode::Char('g') => {
@@ -1468,8 +1670,14 @@ impl App {
             }
             KeyCode::Char('n') => self.jump_to_next_comment(),
             KeyCode::Char('N') => self.jump_to_prev_comment(),
+            KeyCode::Enter => {
+                self.comment_panel_open = true;
+                self.comment_panel_scroll = 0;
+                self.selected_inline_comment = 0;
+            }
             _ => {}
         }
+
         Ok(())
     }
 
@@ -1617,6 +1825,8 @@ impl App {
     fn sync_diff_to_selected_file(&mut self) {
         self.selected_line = 0;
         self.scroll_offset = 0;
+        self.comment_panel_open = false;
+        self.comment_panel_scroll = 0;
         self.pending_g_key = false;
         self.symbol_popup = None;
         self.update_diff_line_count();
@@ -2120,6 +2330,95 @@ impl App {
             .any(|pos| pos.diff_line_index == self.selected_line)
     }
 
+    /// テキスト行がパネル幅内で折り返される表示行数を計算
+    fn wrapped_line_count(text: &str, panel_width: usize) -> usize {
+        if panel_width == 0 {
+            return 1;
+        }
+        let char_count = text.chars().count();
+        if char_count == 0 {
+            return 1;
+        }
+        (char_count + panel_width - 1) / panel_width
+    }
+
+    /// コメント本文の折り返しを考慮した表示行数を計算
+    fn comment_body_wrapped_lines(body: &str, panel_width: usize) -> usize {
+        body.lines()
+            .map(|line| Self::wrapped_line_count(line, panel_width))
+            .sum::<usize>()
+            .max(1) // 空の本文でも最低1行
+    }
+
+    /// コメントパネルのコンテンツ行数を計算（スクロール上限算出用）
+    fn comment_panel_content_lines(&self, panel_inner_width: usize) -> usize {
+        let indices = self.get_comment_indices_at_current_line();
+        if indices.is_empty() {
+            return 1; // "No comments..." message
+        }
+        let Some(ref comments) = self.review_comments else {
+            return 0;
+        };
+        let mut count = 0usize;
+        for (i, &idx) in indices.iter().enumerate() {
+            let Some(comment) = comments.get(idx) else {
+                continue;
+            };
+            if i > 0 {
+                count += 1; // separator
+            }
+            count += 1; // header
+            count += Self::comment_body_wrapped_lines(&comment.body, panel_inner_width);
+            count += 1; // spacing
+        }
+        count
+    }
+
+    /// 指定インラインコメントのパネル内行オフセットを計算（スクロール追従用）
+    fn comment_panel_offset_for(&self, target: usize, panel_inner_width: usize) -> u16 {
+        let indices = self.get_comment_indices_at_current_line();
+        let Some(ref comments) = self.review_comments else {
+            return 0;
+        };
+        let mut offset = 0usize;
+        for (i, &idx) in indices.iter().enumerate() {
+            if i == target {
+                break;
+            }
+            let Some(comment) = comments.get(idx) else {
+                continue;
+            };
+            if i > 0 {
+                offset += 1; // separator
+            }
+            offset += 1; // header
+            offset += Self::comment_body_wrapped_lines(&comment.body, panel_inner_width);
+            offset += 1; // spacing
+        }
+        if target > 0 {
+            offset += 1; // separator before target
+        }
+        offset as u16
+    }
+
+    /// コメントパネルの内側幅を計算（borders分の2を差し引く）
+    fn comment_panel_inner_width(&self, terminal_width: usize) -> usize {
+        let panel_width = match self.state {
+            AppState::SplitViewDiff => terminal_width * 65 / 100,
+            _ => terminal_width,
+        };
+        panel_width.saturating_sub(2) // borders
+    }
+
+    /// コメントパネルのスクロール上限を計算
+    fn max_comment_panel_scroll(&self, terminal_height: usize, terminal_width: usize) -> u16 {
+        let panel_inner_width = self.comment_panel_inner_width(terminal_width);
+        let content_lines = self.comment_panel_content_lines(panel_inner_width);
+        // コメントパネルは全体高さの約40%（Header/Footer/borders分を差し引き）
+        let panel_inner_height = (terminal_height.saturating_sub(8) * 40 / 100).max(1);
+        content_lines.saturating_sub(panel_inner_height) as u16
+    }
+
     /// Jump to next comment in the diff (no wrap-around, scroll to top)
     fn jump_to_next_comment(&mut self) {
         let next = self
@@ -2145,6 +2444,79 @@ impl App {
             self.selected_line = pos.diff_line_index;
             self.scroll_offset = self.selected_line;
         }
+    }
+
+    /// 返信入力モードに遷移
+    fn enter_reply_input(&mut self) {
+        let indices = self.get_comment_indices_at_current_line();
+        if indices.is_empty() {
+            return;
+        }
+
+        let local_idx = self
+            .selected_inline_comment
+            .min(indices.len().saturating_sub(1));
+        let comment_idx = indices[local_idx];
+
+        let Some(ref comments) = self.review_comments else {
+            return;
+        };
+        let Some(comment) = comments.get(comment_idx) else {
+            return;
+        };
+
+        self.reply_context = Some(ReplyContext {
+            comment_id: comment.id,
+            reply_to_user: comment.user.login.clone(),
+            reply_to_body: comment.body.clone(),
+        });
+        self.reply_text_area = TextArea::new();
+        self.preview_return_state = self.state;
+        self.state = AppState::ReplyInput;
+    }
+
+    /// 返信入力のキーハンドリング
+    fn handle_reply_input(&mut self, key: event::KeyEvent) -> Result<()> {
+        match self.reply_text_area.input(key) {
+            TextAreaAction::Submit => {
+                let body = self.reply_text_area.content();
+                if body.trim().is_empty() {
+                    self.reply_context = None;
+                    self.state = self.preview_return_state;
+                    return Ok(());
+                }
+                if let Some(ctx) = self.reply_context.take() {
+                    let repo = self.repo.clone();
+                    let pr_number = self.pr_number;
+                    let (tx, rx) = mpsc::channel(1);
+                    self.comment_submit_receiver = Some(rx);
+                    self.comment_submitting = true;
+
+                    tokio::spawn(async move {
+                        let result = github::create_reply_comment(
+                            &repo,
+                            pr_number,
+                            ctx.comment_id,
+                            &body,
+                        )
+                        .await;
+                        let _ = tx
+                            .send(match result {
+                                Ok(_) => CommentSubmitResult::Success,
+                                Err(e) => CommentSubmitResult::Error(e.to_string()),
+                            })
+                            .await;
+                    });
+                }
+                self.state = self.preview_return_state;
+            }
+            TextAreaAction::Cancel => {
+                self.reply_context = None;
+                self.state = self.preview_return_state;
+            }
+            TextAreaAction::Continue => {}
+        }
+        Ok(())
     }
 
     /// 現在位置をジャンプスタックに保存
@@ -2306,6 +2678,56 @@ impl App {
             let _ = crate::editor::open_file_at_line(&self.config.editor, &path_str, line_number);
             *terminal = crate::ui::setup_terminal()?;
         }
+
+        Ok(())
+    }
+
+    /// 現在のファイルを外部エディタで開く（gf キー）
+    async fn open_current_file_in_editor(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        let file = match self.files().get(self.selected_file) {
+            Some(f) => f.clone(),
+            None => return Ok(()),
+        };
+
+        // 行番号: new_line_number があれば使用、なければ 1
+        let line_number = file.patch.as_ref().and_then(|patch| {
+            crate::diff::get_line_info(patch, self.selected_line)
+                .and_then(|info| info.new_line_number)
+        });
+
+        // リポジトリルート取得 → フルパス構築
+        let full_path = match &self.working_dir {
+            Some(dir) => {
+                let output = tokio::process::Command::new("git")
+                    .args(["rev-parse", "--show-toplevel"])
+                    .current_dir(dir)
+                    .output()
+                    .await;
+                match output {
+                    Ok(o) if o.status.success() => {
+                        let root = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        std::path::Path::new(&root)
+                            .join(&file.filename)
+                            .to_string_lossy()
+                            .to_string()
+                    }
+                    _ => return Ok(()),
+                }
+            }
+            None => return Ok(()),
+        };
+
+        // TUI 一時停止 → エディタ → TUI 復帰
+        crate::ui::restore_terminal(terminal)?;
+        let _ = crate::editor::open_file_at_line(
+            &self.config.editor,
+            &full_path,
+            line_number.unwrap_or(1) as usize,
+        );
+        *terminal = crate::ui::setup_terminal()?;
 
         Ok(())
     }

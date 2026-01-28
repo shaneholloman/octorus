@@ -5,6 +5,7 @@ pub mod diff_view;
 mod file_list;
 mod help;
 mod split_view;
+pub mod text_area;
 
 use anyhow::Result;
 use crossterm::{
@@ -39,7 +40,7 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
     Ok(())
 }
 
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     // Loading状態の場合は専用画面を表示
     if matches!(app.data_state, DataState::Loading) {
         file_list::render_loading(frame, app);
@@ -61,6 +62,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppState::SplitViewFileList | AppState::SplitViewDiff => {
             split_view::render(frame, app)
         }
+        AppState::ReplyInput => diff_view::render_reply_input(frame, app),
     }
 
     // シンボル選択ポップアップ（最前面に描画）

@@ -4,6 +4,7 @@ mod common;
 pub mod diff_view;
 mod file_list;
 mod help;
+mod pr_list;
 mod split_view;
 pub mod text_area;
 
@@ -41,17 +42,21 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
 }
 
 pub fn render(frame: &mut Frame, app: &mut App) {
-    // Loading状態の場合は専用画面を表示
-    if matches!(app.data_state, DataState::Loading) {
-        file_list::render_loading(frame, app);
-        return;
-    }
-    if let DataState::Error(ref msg) = app.data_state {
-        file_list::render_error(frame, app, msg);
-        return;
+    // PR一覧画面は独自のローディング処理があるためスキップ
+    if app.state != AppState::PullRequestList {
+        // Loading状態の場合は専用画面を表示
+        if matches!(app.data_state, DataState::Loading) {
+            file_list::render_loading(frame, app);
+            return;
+        }
+        if let DataState::Error(ref msg) = app.data_state {
+            file_list::render_error(frame, app, msg);
+            return;
+        }
     }
 
     match app.state {
+        AppState::PullRequestList => pr_list::render(frame, app),
         AppState::FileList => file_list::render(frame, app),
         AppState::DiffView => diff_view::render(frame, app),
         AppState::TextInput => diff_view::render_text_input(frame, app),

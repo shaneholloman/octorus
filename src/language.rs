@@ -28,6 +28,15 @@ pub enum SupportedLanguage {
     Cpp,
     Java,
     CSharp,
+    // Phase 1: Additional languages
+    Lua,
+    Bash,
+    Php,
+    Swift,
+    // Kotlin is excluded: highlights.scm uses #lua-match? which is not tree-sitter compatible
+    Haskell,
+    // Svelte is excluded: tree-sitter-svelte-ng requires injection for <script>/<style> content
+    // which octorus doesn't support. Svelte falls back to syntect which provides better highlighting.
 }
 
 /// Combined TypeScript highlights query (JavaScript base + TypeScript-specific).
@@ -109,6 +118,13 @@ impl SupportedLanguage {
             "java" => Some(Self::Java),
             // C#
             "cs" => Some(Self::CSharp),
+            // Phase 1: Additional languages
+            "lua" => Some(Self::Lua),
+            "sh" | "bash" | "zsh" => Some(Self::Bash),
+            "php" => Some(Self::Php),
+            "swift" => Some(Self::Swift),
+            "hs" | "lhs" => Some(Self::Haskell),
+            // Svelte falls back to syntect (better highlighting without injection)
             _ => None,
         }
     }
@@ -133,6 +149,12 @@ impl SupportedLanguage {
             Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             Self::Java => tree_sitter_java::LANGUAGE.into(),
             Self::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            // Phase 1: Additional languages
+            Self::Lua => tree_sitter_lua::LANGUAGE.into(),
+            Self::Bash => tree_sitter_bash::LANGUAGE.into(),
+            Self::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+            Self::Swift => tree_sitter_swift::LANGUAGE.into(),
+            Self::Haskell => tree_sitter_haskell::LANGUAGE.into(),
         }
     }
 
@@ -168,6 +190,12 @@ impl SupportedLanguage {
             }
             Self::Java => tree_sitter_java::HIGHLIGHTS_QUERY,
             Self::CSharp => CSHARP_HIGHLIGHTS_QUERY,
+            // Phase 1: Additional languages
+            Self::Lua => tree_sitter_lua::HIGHLIGHTS_QUERY,
+            Self::Bash => tree_sitter_bash::HIGHLIGHT_QUERY, // Note: singular HIGHLIGHT_QUERY
+            Self::Php => tree_sitter_php::HIGHLIGHTS_QUERY,
+            Self::Swift => tree_sitter_swift::HIGHLIGHTS_QUERY,
+            Self::Haskell => tree_sitter_haskell::HIGHLIGHTS_QUERY,
         }
     }
 
@@ -257,6 +285,29 @@ impl SupportedLanguage {
                 "enum ",
                 "void ",
             ],
+            // Phase 1: Additional languages
+            Self::Lua => &["function ", "local function ", "local "],
+            Self::Bash => &["function ", "alias "],
+            Self::Php => &[
+                "function ",
+                "public function ",
+                "private function ",
+                "protected function ",
+                "class ",
+                "interface ",
+                "trait ",
+            ],
+            Self::Swift => &[
+                "func ",
+                "class ",
+                "struct ",
+                "enum ",
+                "protocol ",
+                "extension ",
+                "var ",
+                "let ",
+            ],
+            Self::Haskell => &["data ", "newtype ", "type ", "class ", "instance "],
         }
     }
 
@@ -660,6 +711,234 @@ impl SupportedLanguage {
                 "record",
                 "with",
             ],
+            // Phase 1: Additional languages
+            Self::Lua => &[
+                "and",
+                "break",
+                "do",
+                "else",
+                "elseif",
+                "end",
+                "false",
+                "for",
+                "function",
+                "goto",
+                "if",
+                "in",
+                "local",
+                "nil",
+                "not",
+                "or",
+                "repeat",
+                "return",
+                "then",
+                "true",
+                "until",
+                "while",
+            ],
+            Self::Bash => &[
+                "if",
+                "then",
+                "else",
+                "elif",
+                "fi",
+                "case",
+                "esac",
+                "for",
+                "while",
+                "until",
+                "do",
+                "done",
+                "in",
+                "function",
+                "select",
+                "time",
+                "coproc",
+                "local",
+                "return",
+                "exit",
+                "break",
+                "continue",
+                "declare",
+                "typeset",
+                "export",
+                "readonly",
+                "unset",
+                "shift",
+                "source",
+                "alias",
+                "true",
+                "false",
+            ],
+            Self::Php => &[
+                "abstract",
+                "and",
+                "array",
+                "as",
+                "break",
+                "callable",
+                "case",
+                "catch",
+                "class",
+                "clone",
+                "const",
+                "continue",
+                "declare",
+                "default",
+                "die",
+                "do",
+                "echo",
+                "else",
+                "elseif",
+                "empty",
+                "enddeclare",
+                "endfor",
+                "endforeach",
+                "endif",
+                "endswitch",
+                "endwhile",
+                "eval",
+                "exit",
+                "extends",
+                "final",
+                "finally",
+                "fn",
+                "for",
+                "foreach",
+                "function",
+                "global",
+                "goto",
+                "if",
+                "implements",
+                "include",
+                "include_once",
+                "instanceof",
+                "insteadof",
+                "interface",
+                "isset",
+                "list",
+                "match",
+                "namespace",
+                "new",
+                "or",
+                "print",
+                "private",
+                "protected",
+                "public",
+                "readonly",
+                "require",
+                "require_once",
+                "return",
+                "static",
+                "switch",
+                "throw",
+                "trait",
+                "try",
+                "unset",
+                "use",
+                "var",
+                "while",
+                "xor",
+                "yield",
+                "true",
+                "false",
+                "null",
+                "self",
+                "parent",
+            ],
+            Self::Swift => &[
+                "associatedtype",
+                "class",
+                "deinit",
+                "enum",
+                "extension",
+                "fileprivate",
+                "func",
+                "import",
+                "init",
+                "inout",
+                "internal",
+                "let",
+                "open",
+                "operator",
+                "private",
+                "protocol",
+                "public",
+                "rethrows",
+                "static",
+                "struct",
+                "subscript",
+                "typealias",
+                "var",
+                "break",
+                "case",
+                "continue",
+                "default",
+                "defer",
+                "do",
+                "else",
+                "fallthrough",
+                "for",
+                "guard",
+                "if",
+                "in",
+                "repeat",
+                "return",
+                "switch",
+                "where",
+                "while",
+                "as",
+                "catch",
+                "is",
+                "nil",
+                "super",
+                "self",
+                "Self",
+                "throw",
+                "throws",
+                "true",
+                "false",
+                "try",
+                "async",
+                "await",
+                "actor",
+                "get",
+                "set",
+                "init",
+                "value",
+            ],
+            Self::Haskell => &[
+                "case",
+                "class",
+                "data",
+                "default",
+                "deriving",
+                "do",
+                "else",
+                "forall",
+                "foreign",
+                "hiding",
+                "if",
+                "import",
+                "in",
+                "infix",
+                "infixl",
+                "infixr",
+                "instance",
+                "let",
+                "mdo",
+                "module",
+                "newtype",
+                "of",
+                "proc",
+                "qualified",
+                "rec",
+                "then",
+                "type",
+                "where",
+                "True",
+                "False",
+            ],
         }
     }
 
@@ -693,6 +972,12 @@ impl SupportedLanguage {
             Self::Cpp,
             Self::Java,
             Self::CSharp,
+            // Phase 1: Additional languages
+            Self::Lua,
+            Self::Bash,
+            Self::Php,
+            Self::Swift,
+            Self::Haskell,
         ]
         .into_iter()
     }
@@ -802,6 +1087,41 @@ mod tests {
             Some(SupportedLanguage::CSharp)
         );
 
+        // Phase 1: Additional languages
+        assert_eq!(
+            SupportedLanguage::from_extension("lua"),
+            Some(SupportedLanguage::Lua)
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("sh"),
+            Some(SupportedLanguage::Bash)
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("bash"),
+            Some(SupportedLanguage::Bash)
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("zsh"),
+            Some(SupportedLanguage::Bash)
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("php"),
+            Some(SupportedLanguage::Php)
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("swift"),
+            Some(SupportedLanguage::Swift)
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("hs"),
+            Some(SupportedLanguage::Haskell)
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("lhs"),
+            Some(SupportedLanguage::Haskell)
+        );
+        // Svelte falls back to syntect (better highlighting without injection)
+        assert_eq!(SupportedLanguage::from_extension("svelte"), None);
     }
 
     #[test]
@@ -833,6 +1153,15 @@ mod tests {
         assert!(SupportedLanguage::is_supported("java"));
         assert!(SupportedLanguage::is_supported("cs"));
 
+        // Phase 1 languages
+        assert!(SupportedLanguage::is_supported("lua"));
+        assert!(SupportedLanguage::is_supported("sh"));
+        assert!(SupportedLanguage::is_supported("php"));
+        assert!(SupportedLanguage::is_supported("swift"));
+        assert!(SupportedLanguage::is_supported("hs"));
+
+        // Svelte falls back to syntect (tree-sitter-svelte-ng requires injection)
+        assert!(!SupportedLanguage::is_supported("svelte"));
         assert!(!SupportedLanguage::is_supported("vue"));
         assert!(!SupportedLanguage::is_supported("mbt"));
         assert!(!SupportedLanguage::is_supported("yaml"));
@@ -1004,7 +1333,7 @@ mod tests {
     #[test]
     fn test_all_iterator() {
         let langs: Vec<_> = SupportedLanguage::all().collect();
-        assert_eq!(langs.len(), 13);
+        assert_eq!(langs.len(), 18);
         assert!(langs.contains(&SupportedLanguage::Rust));
         assert!(langs.contains(&SupportedLanguage::TypeScript));
         assert!(langs.contains(&SupportedLanguage::TypeScriptReact));

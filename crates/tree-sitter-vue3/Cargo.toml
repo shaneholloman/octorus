@@ -1,5 +1,5 @@
 [package]
-name = "tree-sitter-vue3"
+name = "octorus-tree-sitter-vue3"
 version = "0.1.0"
 edition = "2021"
 authors = ["ushironoko"]
@@ -20,6 +20,7 @@ include = [
 ]
 
 [lib]
+name = "tree_sitter_vue3"
 path = "src/lib.rs"
 
 [dependencies]

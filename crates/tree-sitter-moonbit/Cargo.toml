@@ -1,5 +1,5 @@
 [package]
-name = "tree-sitter-moonbit"
+name = "octorus-tree-sitter-moonbit"
 version = "0.1.0"
 edition = "2021"
 authors = ["ushironoko"]
@@ -20,6 +20,7 @@ include = [
 ]
 
 [lib]
+name = "tree_sitter_moonbit"
 path = "src/lib.rs"
 
 [dependencies]
